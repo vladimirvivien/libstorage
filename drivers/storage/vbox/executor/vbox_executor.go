@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/akutz/gofig"
-
 	"github.com/emccode/libstorage/api/registry"
 	"github.com/emccode/libstorage/api/types"
 	"github.com/emccode/libstorage/api/types/context"
@@ -29,7 +28,7 @@ type Executor struct {
 }
 
 func init() {
-	gofig.Register(configRegistration())
+	gofig.Register(LoadConfig())
 	registry.RegisterStorageExecutor(Name, newExecutor)
 }
 
@@ -40,17 +39,10 @@ func newExecutor() drivers.StorageExecutor {
 //Init initializes the executor by connecting to the vbox endpoint
 func (d *Executor) Init(config gofig.Config) error {
 	d.Config = config
-	// connect to vbox
-	uname := d.Config.GetString("virtualbox.username")
-	pwd := d.Config.GetString("virtualbox.username")
-	endpoint := d.Config.GetString("virtualbox.endpoint")
-	d.vbox = client.NewVirtualBox(uname, pwd, endpoint)
-	err := d.vbox.Logon()
-	if err != nil {
+	if err := d.vboxLogon(); err != nil {
 		return err
 	}
-	err = d.loadMachineInfo()
-	if err != nil {
+	if err := d.loadMachineInfo(); err != nil {
 		return err
 	}
 	return nil
@@ -110,6 +102,19 @@ func (d *Executor) RootDir() string {
 	return d.Config.GetString("vfs.root")
 }
 
+func (d *Executor) vboxLogon() error {
+	// connect to vbox
+	uname := d.Config.GetString("virtualbox.username")
+	pwd := d.Config.GetString("virtualbox.username")
+	endpoint := d.Config.GetString("virtualbox.endpoint")
+	d.vbox = client.NewVirtualBox(uname, pwd, endpoint)
+	err := d.vbox.Logon()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (d *Executor) loadMachineInfo() error {
 	m, err := d.vbox.FindMachine(d.Config.GetString("virtualbox.nameOrID"))
 	if err != nil {
@@ -136,7 +141,8 @@ func (d *Executor) getShortDeviceID(f string) string {
 	return aid[0]
 }
 
-func configRegistration() *gofig.Registration {
+//LoadConfig loads configuration
+func LoadConfig() *gofig.Registration {
 	r := gofig.NewRegistration("virtualbox")
 	r.Key(gofig.String, "", "", "", "virtualbox.endpoint")
 	r.Key(gofig.String, "", "", "", "virtualbox.volumePath")
