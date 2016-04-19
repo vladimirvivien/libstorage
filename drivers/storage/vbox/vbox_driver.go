@@ -196,12 +196,17 @@ func (d *driver) VolumeCreate(
 	name string,
 	opts *drivers.VolumeCreateOpts) (*types.Volume, error) {
 
-	size := *opts.Size * 1024 * 1024 * 1024
+	if opts.Size == nil {
+		return nil, goof.New("missing volume size")
+	}
+
 	fields := map[string]interface{}{
 		"provider":   Name,
 		"volumeName": name,
-		"size":       size,
+		"size":       *opts.Size,
 	}
+
+	size := *opts.Size * 1024 * 1024 * 1024
 
 	d.refreshSession()
 	volumes, err := d.vbox.GetMedium("", name)
@@ -228,20 +233,22 @@ func (d *driver) VolumeCreate(
 		return nil, goof.New("failed to get new volume")
 	}
 
-	return &types.Volume{
-		ID:               volume.ID,
-		Name:             volume.Name,
-		Size:             volume.Size,
-		IOPS:             *opts.IOPS,
-		AvailabilityZone: volume.Location,
-	}, nil
+	newVol := &types.Volume{
+		ID:   volume.ID,
+		Name: volume.Name,
+		Size: volume.Size,
+		IOPS: *opts.IOPS,
+		Type: string(volume.DeviceType),
+	}
+
+	return newVol, nil
 }
 
 func (d *driver) VolumeCreateFromSnapshot(
 	ctx context.Context,
 	snapshotID, volumeName string,
 	opts types.Store) (*types.Volume, error) {
-	return nil, nil
+	return nil, types.ErrNotImplemented
 }
 
 func (d *driver) VolumeCopy(
@@ -255,13 +262,28 @@ func (d *driver) VolumeSnapshot(
 	ctx context.Context,
 	volumeID, snapshotName string,
 	opts types.Store) (*types.Snapshot, error) {
-	return nil, nil
+	return nil, types.ErrNotImplemented
 }
 
 func (d *driver) VolumeRemove(
 	ctx context.Context,
 	volumeID string,
 	opts types.Store) error {
+
+	d.Lock()
+	defer d.Unlock()
+	d.refreshSession()
+
+	fields := map[string]interface{}{
+		"provider": Name,
+		"volumeID": volumeID,
+	}
+
+	err := d.vbox.RemoveMedium(volumeID)
+	if err != nil {
+		return goof.WithFieldsE(fields, "error deleting volume", err)
+	}
+
 	return nil
 }
 
