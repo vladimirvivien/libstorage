@@ -1,10 +1,12 @@
 package vbox
 
 import (
+	"io/ioutil"
 	"net"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/akutz/gofig"
@@ -15,6 +17,7 @@ import (
 	"github.com/emccode/libstorage/api/types/context"
 	"github.com/emccode/libstorage/api/types/drivers"
 	"github.com/emccode/libstorage/drivers/storage/vbox/executor"
+	"github.com/emccode/rexray/core/errors"
 )
 
 const (
@@ -209,7 +212,7 @@ func (d *driver) VolumeCreate(
 	size := *opts.Size * 1024 * 1024 * 1024
 
 	d.refreshSession()
-	volumes, err := d.vbox.GetMedium("", name)
+	volumes, err := d.GetVolume(ctx, "", name)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +227,7 @@ func (d *driver) VolumeCreate(
 	}
 
 	// double check
-	volumes, err = d.vbox.GetMedium(volume.ID, "")
+	volumes, err = d.GetVolume(ctx, volume.ID, "")
 	if err != nil {
 		return nil, err
 	}
@@ -287,45 +290,179 @@ func (d *driver) VolumeRemove(
 	return nil
 }
 
+//TODO  - should VolumeAttach return an attachment ?
 func (d *driver) VolumeAttach(
 	ctx context.Context,
 	volumeID string,
 	opts *drivers.VolumeAttachByIDOpts) (*types.Volume, error) {
-	return nil, nil
+
+	if volumeID == "" {
+		return nil, errors.ErrMissingVolumeID
+	}
+
+	volumes, err := d.GetVolume(ctx, volumeID, "")
+	if err != nil {
+		return nil, err
+	}
+
+	if len(volumes) == 0 {
+		return nil, errors.ErrNoVolumesReturned
+	}
+
+	// TODO - force flag from RR not ported here, see RR/drivers/storage/virtualbox.go
+	if len(volumes[0].Attachments) > 0 {
+		return nil, goof.New("volume already attached to a host")
+	}
+
+	err = d.attachVolume(volumeID, "")
+	if err != nil {
+		return nil, goof.WithFieldsE(
+			log.Fields{
+				"provider": Name,
+				"volumeID": volumeID}, "error attaching volume", err)
+	}
+
+	d.rescanScsiHosts()
+
+	// volumeAttachment, err := d.GetVolumeAttach(ctx, volumeID, instanceID)
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	return volumes[0], nil
 }
 
 func (d *driver) VolumeDetach(
 	ctx context.Context,
 	volumeID string,
 	opts types.Store) error {
+
+	if volumeID == "" {
+		return errors.ErrMissingVolumeID
+	}
+
+	volumes, err := d.GetVolume(ctx, volumeID, "")
+	if err != nil {
+		return err
+	}
+
+	if len(volumes) == 0 {
+		return errors.ErrNoVolumesReturned
+	}
+
+	if err = d.detachVolume(volumeID, ""); err != nil {
+		return goof.WithFieldsE(
+			log.Fields{
+				"provier":  Name,
+				"volumeID": volumeID}, "error detaching volume", err)
+	}
+
+	log.Info("Detached volume", volumeID)
 	return nil
+
 }
 
 func (d *driver) Snapshots(
 	ctx context.Context,
 	opts types.Store) ([]*types.Snapshot, error) {
-	return nil, nil
+	return nil, errors.ErrNotImplemented
 }
 
 func (d *driver) SnapshotInspect(
 	ctx context.Context,
 	snapshotID string,
 	opts types.Store) (*types.Snapshot, error) {
-	return nil, nil
+	return nil, errors.ErrNotImplemented
 }
 
 func (d *driver) SnapshotCopy(
 	ctx context.Context,
 	snapshotID, snapshotName, destinationID string,
 	opts types.Store) (*types.Snapshot, error) {
-	return nil, nil
+	return nil, errors.ErrNotImplemented
 }
 
 func (d *driver) SnapshotRemove(
 	ctx context.Context,
 	snapshotID string,
 	opts types.Store) error {
-	return nil
+	return errors.ErrNotImplemented
+}
+
+func (d *driver) GetVolume(ctx context.Context, volumeID, volumeName string) ([]*types.Volume, error) {
+	d.Lock()
+	d.refreshSession()
+
+	volumes, err := d.vbox.GetMedium(volumeID, volumeName)
+	if err != nil {
+		return nil, err
+	}
+	d.Unlock()
+
+	if len(volumes) == 0 {
+		return nil, nil
+	}
+
+	volumeMapping, err := d.Volumes(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	mapDN := make(map[string]string)
+	for _, vm := range volumeMapping {
+		mapDN[vm.ID] = vm.Name
+	}
+
+	var volumesSD []*types.Volume
+
+	for _, v := range volumes {
+		var attachmentsSD []*types.VolumeAttachment
+		for _, mid := range v.MachineIDs {
+			dn, _ := mapDN[v.ID]
+			attachmentSD := &types.VolumeAttachment{
+				VolumeID:   v.ID,
+				InstanceID: &types.InstanceID{ID: mid},
+				DeviceName: dn,
+				Status:     v.Location,
+			}
+			attachmentsSD = append(attachmentsSD, attachmentSD)
+		}
+
+		volumeSD := &types.Volume{
+			Name:        v.Name,
+			ID:          v.ID,
+			Size:        int64(v.LogicalSize / 1024 / 1024 / 1024),
+			Status:      v.Location,
+			Attachments: attachmentsSD,
+		}
+		volumesSD = append(volumesSD, volumeSD)
+	}
+
+	return volumesSD, nil
+}
+
+func (d *driver) GetVolumeAttach(ctx context.Context, volumeID, instanceID string) ([]*types.VolumeAttachment, error) {
+	if volumeID == "" {
+		return nil, errors.ErrMissingVolumeID
+	}
+	volume, err := d.GetVolume(ctx, volumeID, "")
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO - Logic looks suspicious, attached always false
+	if instanceID != "" {
+		var attached bool
+		for _, volumeAttachment := range volume[0].Attachments {
+			if volumeAttachment.InstanceID.ID == instanceID {
+				return volume[0].Attachments, nil
+			}
+		}
+		if !attached {
+			return []*types.VolumeAttachment{}, nil
+		}
+	}
+	return volume[0].Attachments, nil
 }
 
 func (d *driver) vboxLogon() error {
@@ -455,4 +592,74 @@ func (d *driver) createVolume(name string, size int64) (*vbox.Medium, error) {
 	}
 	path := filepath.Join(d.volumePath, name)
 	return d.vbox.CreateMedium("vmdk", path, size)
+}
+
+func (d *driver) attachVolume(volumeID, volumeName string) error {
+	d.Lock()
+	defer d.Unlock()
+	d.refreshSession()
+
+	medium, err := d.vbox.GetMedium(volumeID, volumeName)
+	if err != nil {
+		return err
+	}
+
+	if len(medium) == 0 {
+		return goof.New("no volume returned")
+	}
+	if len(medium) > 1 {
+		return goof.New("too many volumes returned")
+	}
+
+	if err := d.machine.Refresh(); err != nil {
+		return err
+	}
+	defer d.machine.Release()
+
+	if err := d.machine.AttachDevice(medium[0]); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (d *driver) detachVolume(volumeID, volumeName string) error {
+	d.Lock()
+	defer d.Unlock()
+	d.refreshSession()
+
+	media, err := d.vbox.GetMedium(volumeID, volumeName)
+	if err != nil {
+		return err
+	}
+
+	if len(media) == 0 {
+		return goof.New("no volume returned")
+	}
+	if len(media) > 1 {
+		return goof.New("too many volumes returned")
+	}
+
+	if err := d.machine.Refresh(); err != nil {
+		return err
+	}
+	defer d.machine.Release()
+
+	if err := media[0].DetachMachines(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (d *driver) rescanScsiHosts() {
+	hosts := "/sys/class/scsi_host/"
+	if dirs, err := ioutil.ReadDir(hosts); err == nil {
+		for _, f := range dirs {
+			name := hosts + f.Name() + "/scan"
+			data := []byte("- - -")
+			ioutil.WriteFile(name, data, 0666)
+		}
+	}
+	time.Sleep(1 * time.Second)
 }
