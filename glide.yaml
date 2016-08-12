@@ -24,8 +24,8 @@ import:
 
 ### ScaleIO
   - package: github.com/emccode/goscaleio
-    ref:     9d95003c0069b1949a0fb46832870799caa5c360
-    repo:    https://github.com/emccode/goscaleio
+    ref:     3722734b8fd656e6c0801b3bf9dbd7e5c90f72bc
+    repo:    https://github.com/vladimirvivien/goscaleio.git
 
 ### VirtualBox
   - package: github.com/appropriate/go-virtualboxclient

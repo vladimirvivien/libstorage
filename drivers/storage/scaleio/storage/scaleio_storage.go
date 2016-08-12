@@ -23,9 +23,9 @@ const (
 type driver struct {
 	config           gofig.Config
 	client           *sio.Client
-	system           *sio.System
-	protectionDomain *sio.ProtectionDomain
-	storagePool      *sio.StoragePool
+	system           *siotypes.System
+	protectionDomain *siotypes.ProtectionDomain
+	storagePool      *siotypes.StoragePool
 }
 
 func init() {
@@ -60,7 +60,7 @@ func (d *driver) Init(context types.Context, config gofig.Config) error {
 		return goof.WithFieldsE(fields, "error constructing new client", err)
 	}
 
-	if _, err = d.client.Authenticate(
+	if err = d.client.Authenticate(
 		&sio.ConfigConnect{
 			Endpoint: d.endpoint(),
 			Version:  d.version(),
@@ -74,39 +74,33 @@ func (d *driver) Init(context types.Context, config gofig.Config) error {
 		return goof.WithFieldsE(fields, "error authenticating", err)
 	}
 
-	if d.system, err = d.client.FindSystem(
-		d.systemID(),
-		d.systemName(), ""); err != nil {
+	if d.system, err = d.findSystem(d.systemID(), d.systemName()); err != nil {
 		fields["systemId"] = d.systemID()
 		fields["systemName"] = d.systemName()
 		log.WithFields(fields).Debug(err.Error())
 		return goof.WithFieldsE(fields, "error finding system", err)
 	}
 
-	var pd *siotypes.ProtectionDomain
-	if pd, err = d.system.FindProtectionDomain(
+	if d.protectionDomain, err = d.findProtectionDomain(
 		d.protectionDomainID(),
-		d.protectionDomainName(), ""); err != nil {
+		d.protectionDomainName()); err != nil {
+
 		fields["domainId"] = d.protectionDomainID()
 		fields["domainName"] = d.protectionDomainName()
 		log.WithFields(fields).Debug(err.Error())
 		return goof.WithFieldsE(fields,
 			"error finding protection domain", err)
 	}
-	d.protectionDomain = sio.NewProtectionDomain(d.client)
-	d.protectionDomain.ProtectionDomain = pd
 
-	var sp *siotypes.StoragePool
-	if sp, err = d.protectionDomain.FindStoragePool(
+	if d.storagePool, err = d.findStoragePool(
 		d.storagePoolID(),
-		d.storagePoolName(), ""); err != nil {
+		d.storagePoolName()); err != nil {
+
 		fields["storagePoolId"] = d.storagePoolID()
 		fields["storagePoolName"] = d.storagePoolName()
 		log.WithFields(fields).Debug(err.Error())
 		return goof.WithFieldsE(fields, "error finding storage pool", err)
 	}
-	d.storagePool = sio.NewStoragePool(d.client)
-	d.storagePool.StoragePool = sp
 
 	log.WithFields(fields).Info("storage driver initialized")
 
@@ -134,7 +128,7 @@ func (d *driver) InstanceInspect(
 	var (
 		err     error
 		sdcGUID string
-		sdc     *sio.Sdc
+		sdc     *siotypes.Sdc
 	)
 
 	if err = iid.UnmarshalMetadata(&sdcGUID); err != nil {
@@ -142,14 +136,14 @@ func (d *driver) InstanceInspect(
 	}
 
 	sdcGUID = strings.ToUpper(sdcGUID)
-	if sdc, err = d.system.FindSdc("SdcGuid", sdcGUID); err != nil {
+	if sdc, err = d.client.GetSdcByGUID(sdcGUID); err != nil {
 		return nil, scaleio.ErrFindingSDC(sdcGUID, err)
 	}
 
 	if sdc != nil {
 		return &types.Instance{
 			InstanceID: &types.InstanceID{
-				ID:     sdc.Sdc.ID,
+				ID:     sdc.ID,
 				Driver: d.Name(),
 			},
 		}, nil
@@ -200,9 +194,9 @@ func (d *driver) Volumes(
 		return ""
 	}
 
-	volumes, err := d.getVolume("", "", false)
+	volumes, err := d.client.GetVolumes()
 	if err != nil {
-		return []*types.Volume{}, err
+		return nil, err
 	}
 
 	var volumesSD []*types.Volume
@@ -368,12 +362,13 @@ func (d *driver) VolumeCreate(ctx types.Context, volumeName string,
 		volume.IOPS = *opts.IOPS
 	}
 
-	vol, err := d.createVolume(ctx, volumeName, volume)
+	volID, err := d.createVolume(ctx, volumeName, volume)
 	if err != nil {
 		return nil, err
 	}
 
-	return d.VolumeInspect(ctx, vol.ID, &types.VolumeInspectOpts{
+	//TODO is this additional inspect needed.
+	return d.VolumeInspect(ctx, volID, &types.VolumeInspectOpts{
 		Attachments: true,
 	})
 }
@@ -400,7 +395,7 @@ func (d *driver) VolumeCreateFromSnapshot(
 			"volume name already exists")
 	}
 
-	resp, err := d.VolumeCreate(ctx, volumeName, opts)
+	vol, err := d.VolumeCreate(ctx, volumeName, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -410,7 +405,7 @@ func (d *driver) VolumeCreateFromSnapshot(
 		Opts:        opts.Opts,
 	}
 
-	createdVolume, err := d.VolumeInspect(ctx, resp.ID, volumeInspectOpts)
+	createdVolume, err := d.VolumeInspect(ctx, vol.ID, volumeInspectOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -445,17 +440,8 @@ func (d *driver) VolumeRemove(
 		"volumeId": volumeID,
 	})
 
-	var err error
-	var volumes []*siotypes.Volume
-
-	if volumes, err = d.getVolume(volumeID, "", false); err != nil {
-		return goof.WithFieldsE(fields, "error getting volume", err)
-	}
-
-	targetVolume := sio.NewVolume(d.client)
-	targetVolume.Volume = volumes[0]
-
-	if err = targetVolume.RemoveVolume("ONLY_ME"); err != nil {
+	if err := d.client.RemoveVolume(
+		volumeID, sio.RemoveMode.OnlyMe); err != nil {
 		return goof.WithFieldsE(fields, "error removing volume", err)
 	}
 
@@ -495,24 +481,21 @@ func (d *driver) VolumeAttach(
 		}
 	}
 
-	targetVolume := sio.NewVolume(d.client)
-	targetVolume.Volume = &siotypes.Volume{ID: vol.ID}
-
-	err = targetVolume.MapVolumeSdc(mapVolumeSdcParam)
-	if err != nil {
+	if err := d.client.AddMappedSdc(volumeID, mapVolumeSdcParam); err != nil {
 		return nil, "", goof.WithError("error mapping volume sdc", err)
 	}
 
-	attachedVol, err := d.VolumeInspect(
-		ctx, volumeID, &types.VolumeInspectOpts{
-			Attachments: true,
-			Opts:        opts.Opts,
-		})
-	if err != nil {
-		return nil, "", goof.WithError("error getting volume", err)
-	}
+	// TODO remove, not sure why the secode inspect
+	// attachedVol, err := d.VolumeInspect(
+	// 	ctx, volumeID, &types.VolumeInspectOpts{
+	// 		Attachments: true,
+	// 		Opts:        opts.Opts,
+	// 	})
+	// if err != nil {
+	// 	return nil, "", goof.WithError("error getting volume", err)
+	// }
 
-	return attachedVol, attachedVol.ID, nil
+	return vol, vol.ID, nil
 }
 
 func (d *driver) VolumeDetach(
@@ -521,18 +504,6 @@ func (d *driver) VolumeDetach(
 	opts *types.VolumeDetachOpts) (*types.Volume, error) {
 
 	iid := context.MustInstanceID(ctx)
-
-	volumes, err := d.getVolume(volumeID, "", false)
-	if err != nil {
-		return nil, goof.WithError("error getting volume", err)
-	}
-
-	if len(volumes) == 0 {
-		return nil, goof.New("no volumes returned")
-	}
-
-	targetVolume := sio.NewVolume(d.client)
-	targetVolume.Volume = volumes[0]
 
 	unmapVolumeSdcParam := &siotypes.UnmapVolumeSdcParam{
 		SdcID:                "",
@@ -546,7 +517,7 @@ func (d *driver) VolumeDetach(
 		unmapVolumeSdcParam.SdcID = iid.ID
 	}
 
-	if err := targetVolume.UnmapVolumeSdc(unmapVolumeSdcParam); err != nil {
+	if err := d.client.RemoveMappedSdc(volumeID, unmapVolumeSdcParam); err != nil {
 		return nil, err
 	}
 
@@ -605,9 +576,38 @@ func shrink(n string) string {
 	return n
 }
 
+func (d *driver) findSystem(id, name string) (*siotypes.System, error) {
+	if id != "" {
+		return d.client.GetSystemByID(id)
+	} else if name != "" {
+		return d.client.GetSystemByName(name)
+	}
+	return nil, goof.New("missing id or name")
+}
+
+func (d *driver) findStoragePool(
+	id, name string) (*siotypes.StoragePool, error) {
+	if id != "" {
+		return d.client.GetStoragePoolByID(id)
+	} else if name != "" {
+		return d.client.GetStoragePoolByName(name)
+	}
+	return nil, goof.New("missing id or name")
+}
+
+func (d *driver) findProtectionDomain(
+	id, name string) (*siotypes.ProtectionDomain, error) {
+	if id != "" {
+		return d.client.GetProtectionDomainByID(id)
+	} else if name != "" {
+		return d.client.GetProtectionDomainByName(name)
+	}
+	return nil, goof.New("missing id or name")
+}
+
 func (d *driver) getStoragePoolIDs() (
 	map[string]*siotypes.StoragePool, error) {
-	storagePools, err := d.client.GetStoragePool("")
+	storagePools, err := d.client.GetStoragePools()
 	if err != nil {
 		return nil, err
 	}
@@ -622,7 +622,7 @@ func (d *driver) getStoragePoolIDs() (
 
 func (d *driver) getProtectionDomainIDs() (
 	map[string]*siotypes.ProtectionDomain, error) {
-	protectionDomains, err := d.system.GetProtectionDomain("")
+	protectionDomains, err := d.client.GetProtectionDomains()
 	if err != nil {
 		return nil, err
 	}
@@ -638,18 +638,32 @@ func (d *driver) getProtectionDomainIDs() (
 func (d *driver) getVolume(
 	volumeID, volumeName string, getSnapshots bool) (
 	[]*siotypes.Volume, error) {
-
 	volumeName = shrink(volumeName)
 
-	volumes, err := d.client.GetVolume("", volumeID, "", volumeName, getSnapshots)
+	if volumeID != "" {
+		vol, err := d.client.GetVolumeByID(volumeID)
+		if err != nil {
+			return nil, err
+		}
+		return []*siotypes.Volume{vol}, nil
+	}
+
+	var filtered []*siotypes.Volume
+	volumes, err := d.client.GetVolumes()
 	if err != nil {
 		return nil, err
 	}
-	return volumes, nil
+	for _, vol := range volumes {
+		if (vol.Name == volumeName) &&
+			(getSnapshots == (vol.AncestorVolumeID != "")) {
+			filtered = append(filtered, vol)
+		}
+	}
+	return filtered, nil
 }
 
 func (d *driver) createVolume(ctx types.Context, volumeName string,
-	vol *types.Volume) (*siotypes.VolumeResp, error) {
+	vol *types.Volume) (string, error) {
 
 	volumeName = shrink(volumeName)
 
@@ -663,22 +677,23 @@ func (d *driver) createVolume(ctx types.Context, volumeName string,
 	})
 
 	volumeParam := &siotypes.VolumeParam{
+		StoragePoolID:  d.storagePool.ID,
 		Name:           volumeName,
 		VolumeSizeInKb: strconv.Itoa(int(vol.Size) * 1024 * 1024),
 		VolumeType:     d.thinOrThick(),
 	}
 
 	if vol.Type == "" {
-		vol.Type = d.storagePool.StoragePool.Name
+		vol.Type = d.storagePool.Name
 		fields["volumeType"] = vol.Type
 	}
 
-	volumeResp, err := d.client.CreateVolume(volumeParam, vol.Type)
+	volID, err := d.client.CreateVolume(volumeParam)
 	if err != nil {
-		return nil, goof.WithFieldsE(fields, "error creating volume", err)
+		return "", goof.WithFieldsE(fields, "error creating volume", err)
 	}
 
-	return volumeResp, nil
+	return volID, nil
 }
 
 //TODO change provider to be dynamic...
@@ -694,39 +709,6 @@ func eff(fields goof.Fields) map[string]interface{} {
 	}
 	return errFields
 }
-
-// func (d *driver) GetVolumeAttach(
-// 	ctx types.Context, volumeID, instanceID string,
-// 	opts *drivers.VolumeInspectOpts) ([]*types.VolumeAttachment, error) {
-//
-// 	fields := eff(map[string]interface{}{
-// 		"volumeId":   volumeID,
-// 		"instanceId": instanceID,
-// 	})
-//
-// 	if volumeID == "" {
-// 		return []*types.VolumeAttachment{},
-// 			goof.WithFields(fields, "volumeId is required")
-// 	}
-// 	volume, err := d.VolumeInspect(ctx, volumeID, opts)
-// 	if err != nil {
-// 		return []*types.VolumeAttachment{},
-// 			goof.WithFieldsE(fields, "error getting volume", err)
-// 	}
-//
-// 	if instanceID != "" {
-// 		var attached bool
-// 		for _, volumeAttachment := range volume.Attachments {
-// 			if volumeAttachment.InstanceID.ID == instanceID {
-// 				return volume.Attachments, nil
-// 			}
-// 		}
-// 		if !attached {
-// 			return []*types.VolumeAttachment{}, nil
-// 		}
-// 	}
-// 	return volume.Attachments, nil
-// }
 
 ///////////////////////////////////////////////////////////////////////
 //////                  CONFIG HELPER STUFF                   /////////

@@ -1,5 +1,5 @@
-hash: 794f4ee740f0eae62a42d92104f210d1a46f4727bbd4543fc3f41dde41fde517
-updated: 2016-07-01T13:54:05.201343222-07:00
+hash: dc8691f19ecee02d79c57a880be55a72d950b8794dd38eacd5f6100202619212
+updated: 2016-08-11T23:06:39.097713-04:00
 imports:
 - name: github.com/akutz/gofig
   version: 697c16916338166671910eeaccc50f21e3c10726
@@ -34,8 +34,8 @@ imports:
   subpackages:
   - api/v1
 - name: github.com/emccode/goscaleio
-  version: 9d95003c0069b1949a0fb46832870799caa5c360
-  repo: https://github.com/emccode/goscaleio
+  version: 3722734b8fd656e6c0801b3bf9dbd7e5c90f72bc
+  repo: https://github.com/vladimirvivien/goscaleio.git
   subpackages:
   - types/v1
 - name: github.com/go-yaml/yaml
@@ -49,7 +49,7 @@ imports:
   version: 1dd44b25b79c4d9060e582e90798e4d72537818c
   repo: https://github.com/akutz/go-bindata
 - name: github.com/kardianos/osext
-  version: 29ae4ffbc9a6fe9fb2bc5029050ce6996ea1d3bc
+  version: c2c54e542fb797ad986b31721e1baedf214ca413
   repo: https://github.com/kardianos/osext.git
   vcs: git
 - name: github.com/kr/pretty
